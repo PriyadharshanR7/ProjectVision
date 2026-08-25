@@ -1,0 +1,11 @@
+# ObstacleGuard – Phase-0 prototype dependencies
+# Install: pip install -r requirements.txt
+
+ultralytics>=8.0          # YOLOv8n object detection
+torch>=1.13               # PyTorch (MiDaS backend)
+torchvision>=0.14         # required by MiDaS transforms
+opencv-python>=4.7        # capture, resize, overlay
+numpy>=1.23               # array operations
+pyttsx3>=2.90             # offline text-to-speech
+sounddevice>=0.4          # proximity beep (sine-wave playback)
+timm                      # required by MiDaS hub loader
