@@ -13,27 +13,18 @@ Usage examples
     python main.py --no-speech --beep      # beep only, no TTS
     python main.py --log alerts.txt        # also write alerts to file
     python main.py --no-show               # headless (no window)
+    python main.py --gui                   # desktop GUI (video file or webcam)
+    python gui.py                          # same GUI, direct launch
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-import time
 
 import cv2
-import numpy as np
 
-from config import FRAME_WIDTH, FRAME_HEIGHT
 from capture import Capture
-from detector import Detector
-from depth import DepthEstimator
-from fusion import fuse
-from tracker import Tracker
-from priority import rank
-from speech import Speaker
-from beep import Beeper
-from overlay import draw
+from pipeline import ObstaclePipeline, load_models
 
 
 # ── CLI ─────────────────────────────────────────────────────────
@@ -76,6 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Also write timestamped announcements to FILE",
     )
+    p.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch the desktop GUI instead of the CLI loop",
+    )
     return p
 
 
@@ -83,87 +79,64 @@ def _build_parser() -> argparse.ArgumentParser:
 def main():
     args = _build_parser().parse_args()
 
+    if args.gui:
+        from gui import run_gui
+
+        run_gui()
+        return
+
     # Interpret --source
     source = int(args.source) if args.source.isdigit() else args.source
 
     # ── model loading ───────────────────────────────────────────
     print("[init] Loading YOLOv8n …")
-    detector = Detector()
-
-    print("[init] Loading MiDaS-small …")
-    depth_est = DepthEstimator()
+    detector, depth_est = load_models(lambda msg: print(f"[init] {msg}"))
 
     print("[init] Opening capture source …")
     cap = Capture(source)
-
-    tracker = Tracker()
-    speaker = Speaker(enabled=args.speech, log_file=args.log)
-    beeper = Beeper(enabled=args.beep)
-    beeper.start()
+    pipe = ObstaclePipeline(
+        detector,
+        depth_est,
+        speech=args.speech,
+        beep=args.beep,
+        log_file=args.log,
+    )
 
     print("[init] Pipeline running.  Press 'q' to quit.")
-    fps: float = 0.0
     fault_spoken = False
 
     try:
         while True:
-            t0 = time.monotonic()
-
             frame = cap.read()
 
-            # ── handle missing frames / fault ───────────────────
+            # ── handle missing frames / fault / EOF ─────────────
             if frame is None:
+                if cap.eof:
+                    print("[info] End of video.")
+                    break
                 if cap.fault:
                     if not fault_spoken:
-                        speaker.fault("Camera feed lost")
+                        pipe.speaker.fault("Camera feed lost")
                         fault_spoken = True
                     if args.show:
-                        blank = np.zeros(
-                            (FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8
-                        )
-                        draw(blank, [], fps, fault=True)
-                        cv2.imshow("ObstacleGuard", blank)
+                        result = pipe.process_fault()
+                        cv2.imshow("ObstacleGuard", result.vis)
                         if cv2.waitKey(1) & 0xFF == ord("q"):
                             break
                 continue
 
             fault_spoken = False
+            result = pipe.process_frame(frame)
 
-            # Ensure consistent resolution
-            frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
-
-            # ── pipeline stages ─────────────────────────────────
-            detections = detector.detect(frame)
-            depth_map = depth_est.estimate(frame)
-            fused = fuse(detections, depth_map)
-            tracks = tracker.update(fused)
-            top = rank(tracks)
-
-            # ── outputs ─────────────────────────────────────────
-            speaker.announce(top)
-
-            # Beep tracks the single nearest active object
-            active = [t for t in tracks if t.lost == 0]
-            if active:
-                nearest = max(active, key=lambda t: t.det.get("depth_val", 0))
-                beeper.update(nearest.det["distance"])
-
-            # Timing
-            dt = time.monotonic() - t0
-            fps = 1.0 / dt if dt > 0 else 0.0
-
-            # Overlay
             if args.show:
-                vis = draw(frame, tracks, fps)
-                cv2.imshow("ObstacleGuard", vis)
+                cv2.imshow("ObstacleGuard", result.vis)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
     except KeyboardInterrupt:
         print("\n[info] Interrupted by user.")
     finally:
-        beeper.stop()
-        speaker.shutdown()
+        pipe.shutdown()
         cap.release()
         cv2.destroyAllWindows()
         print("[done] Pipeline stopped.")

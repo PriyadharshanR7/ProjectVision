@@ -1,0 +1,93 @@
+================================================================================
+OBSTACLEGUARD - SYSTEM ARCHITECTURE & CODE EXPLANATION GUIDE
+================================================================================
+
+This document explains the inner workings of the ObstacleGuard project in complete detail. You can use this guide to prepare for a presentation or code walkthrough. It covers the data flow, the AI models used, the tracking algorithms, the priority engine, and the audio anti-spam mechanisms.
+
+--------------------------------------------------------------------------------
+1. HIGH-LEVEL OVERVIEW
+--------------------------------------------------------------------------------
+ObstacleGuard is an assistive computer vision system for visually impaired users. It processes a video feed (webcam or file) in real-time, detects objects, estimates how far away they are, tracks them over time, and issues non-intrusive audio alerts (speech and beeps) to guide the user safely around obstacles.
+
+The code is heavily modularized. The entire system is orchestrated by `pipeline.py`, which processes each frame step-by-step in a loop.
+
+--------------------------------------------------------------------------------
+2. THE FRAME-BY-FRAME PIPELINE (The Core Loop)
+--------------------------------------------------------------------------------
+Every time a new frame is grabbed from the camera, it goes through the following 8 stages. This logic is housed inside `pipeline.py` -> `ObstaclePipeline.process_frame()`:
+
+STEP 1: CAPTURE (`capture.py`)
+- The system reads a frame using OpenCV (`cv2.VideoCapture`).
+- It has a built-in fault detector: if a frame takes too long to arrive (e.g., the camera disconnects), it flags a "fault" so the system can warn the user that they are flying blind.
+- The frame is resized to a standard 640x480 to keep processing speeds consistent.
+
+STEP 2: OBJECT DETECTION (`detector.py`)
+- The resized frame is passed into a YOLOv8n (Nano) neural network.
+- YOLO identifies objects in the frame (cars, people, benches, etc.).
+- Output: A list of dictionaries containing the object's class label, confidence score, and 2D bounding box (x1, y1, x2, y2).
+
+STEP 3: DEPTH ESTIMATION (`depth.py`)
+- The exact same frame is passed into MiDaS-small, a monocular depth estimation neural network.
+- MiDaS calculates relative depth. It outputs a 2D map (a grayscale image) where each pixel represents "inverse depth" (brighter pixels = closer objects).
+- The map is normalized to a 0.0 to 1.0 scale (1.0 being right in front of the camera).
+
+STEP 4: SENSOR FUSION (`fusion.py`)
+- The 2D bounding boxes from YOLO are overlaid onto the MiDaS depth map.
+- For each bounding box, the system extracts that specific region from the depth map and calculates the *median* depth value. (Median is used instead of mean to ignore background pixels that might be accidentally caught inside the box edges).
+- Spatial Bucketing: 
+  * Distance: The median depth value categorizes the object into "near", "mid", or "far" buckets based on thresholds in `config.py`.
+  * Direction: The center X-coordinate of the bounding box categorizes the object as "left", "center", or "right".
+
+STEP 5: TRACKING & KINEMATICS (`tracker.py`)
+- The system needs to know if an object in frame 2 is the same object from frame 1 to avoid treating it as a new threat.
+- It uses a greedy Intersection-Over-Union (IOU) matching algorithm. It checks how much the new bounding boxes overlap with the previous frame's boxes.
+- Persistent IDs: Matched objects keep their unique ID (e.g., Track #4).
+- Approaching Detection: It maintains a rolling history of the bounding box's area (size). If the average size in the recent half of the history is 15% larger than the older half, the object is flagged as "approaching".
+- Staleness: It tracks how many consecutive frames an object has stayed in the exact same distance bucket (`bucket_streak`).
+
+STEP 6: PRIORITY SCORING (`priority.py`)
+- The system evaluates all active tracks to determine if they are actually dangerous using a 5-signal additive scoring model:
+  1. Distance: near (+5.0), mid (+3.0), far (0.0).
+  2. Class: Vehicles (+3.0), People/Bikes (+2.0), Static objects like benches (+1.0).
+  3. Direction: Center (+1.5), Left/Right (+1.0).
+  4. Approach: +2.0 if the object is getting closer.
+  5. Staleness Penalty: -3.0 if the object has been sitting in the same bucket for >= 15 frames.
+- Confidence Dampening: If the YOLO confidence is very low (< 0.5), the score is gently multiplied by a fraction to dampen flickering ghosts.
+- Thresholding: The final score must meet `MIN_ALERT_SCORE` (5.5) to be considered an active threat. If it doesn't, it is silently ignored.
+- The `rank()` function sorts them by score and returns up to `TOP_K` (3) highest threats.
+
+STEP 7: AUDIO ALERTS (`speech.py` & `beep.py`)
+- Beeping: The `Beeper` thread looks at the closest alert-worthy object. If it's "near", it plays a fast 1000Hz sine wave. If "mid", a slower 600Hz tone. If "far" or no threat, it stays completely silent.
+- Text-to-Speech (TTS): The `Speaker` takes the highest-priority threat and processes it through a strict anti-spam waterfall:
+  1. Per-track Cooldown: Near objects have a 3s cooldown, Mid 6s, Far 12s.
+  2. Escalation Override: If an object moves to a closer bucket (e.g., Mid to Near), it instantly bypasses all cooldowns to warn the user immediately.
+  3. Same-Info Suppression: If the system is about to say the exact same thing (same label, direction, distance, and approach state) as last time, it doubles the cooldown.
+  4. Global Rate Limit: It enforces a minimum 2-second gap between *any* spoken alerts to prevent overlapping voices.
+  5. If the alert passes these checks, it is pushed to a small queue (max 4 items) and spoken by a dedicated background TTS thread using Windows SAPI or Pyttsx3.
+
+STEP 8: VISUAL OVERLAY (`overlay.py`)
+- For debugging, testing, and sighted assistance, the pipeline draws the bounding boxes (red=near, yellow=mid, green=far), track IDs, FPS, and priority tags ("ALERT" vs "watch") onto a copy of the video frame.
+
+--------------------------------------------------------------------------------
+3. THREADING & CONCURRENCY MODEL
+--------------------------------------------------------------------------------
+To ensure the video doesn't freeze when the computer is speaking or playing audio, the program relies on multi-threading:
+- Main/GUI Thread: Runs the Tkinter window or OpenCV `imshow` UI.
+- Pipeline Thread (in GUI mode): A background loop that rapidly runs the 8 steps above, pushing finished frames to the GUI.
+- Speaker Thread: A daemon thread dedicated strictly to TTS. Windows SAPI requires COM initialization on the exact thread that calls `speak()`. This thread listens to a thread-safe Queue.
+- Beeper Thread: A daemon thread running a continuous loop, playing sine waves through the `sounddevice` library based on the current shared `_bucket` variable.
+
+--------------------------------------------------------------------------------
+4. KEY DESIGN PHILOSOPHIES TO HIGHLIGHT IN YOUR EXPLANATION
+--------------------------------------------------------------------------------
+When explaining this code, emphasize the "Calm Co-Pilot" philosophy. 
+Most naive obstacle detectors spam the user with "Chair ahead, Chair ahead, Chair ahead" every single frame, causing the visually impaired user to mute the device because it masks their natural hearing and spatial awareness.
+
+ObstacleGuard solves this through:
+1. The Staleness Penalty: If an object isn't moving relative to the user, the system actively drops its priority score, fading it out of the audio landscape.
+2. Smart Escalations: It remains quiet to let the user listen to their environment, but the exact moment a car swerves toward them (distance escalates to 'near', or area grows indicating 'approaching'), the system instantly breaks its silence.
+3. Decoupled Processing: Object detection (fast) and Speech (slow) are decoupled via queues and independent threads so the AI never drops a frame of video just because the robotic voice is currently busy speaking a long word.
+
+================================================================================
+End of Guide
+================================================================================

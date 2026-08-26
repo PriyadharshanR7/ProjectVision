@@ -31,20 +31,48 @@ AREA_HISTORY_LEN = 6             # rolling window for approach detection
 APPROACH_RATIO = 1.15            # second-half / first-half area ratio to flag
 
 # ──────────────────────────── priority ───────────────────────────
-DISTANCE_WEIGHTS = {"near": 3.0, "mid": 2.0, "far": 1.0}
+DISTANCE_WEIGHTS = {"near": 5.0, "mid": 3.0, "far": 0.0}
 
 VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "train", "airplane"}
 PERSON_CYCLE_CLASSES = {"person", "bicycle"}
 CLASS_WEIGHTS = {"vehicle": 3.0, "person_cycle": 2.0, "static": 1.0}
-APPROACH_BONUS = 1.5
-TOP_K = 2                       # speak only the top-K objects per cycle
+APPROACH_BONUS = 2.0
+TOP_K = 3                        # evaluate top-K objects per cycle
+
+# Direction bias: centre obstacles are the most dangerous
+DIRECTION_WEIGHTS = {"center": 1.5, "left": 1.0, "right": 1.0}
+
+# Minimum composite score to consider a track alert-worthy.
+# Objects below this are silently ignored (no TTS, no beep).
+# Score examples:  near+person+center = 5+2+1.5 = 8.5 ✓
+#                  mid+car+center     = 3+3+1.5 = 7.5 ✓
+#                  mid+bench+left     = 3+1+1   = 5.0 ✗ (silent)
+#                  far+car+right      = 0+3+1   = 4.0 ✗ (silent)
+MIN_ALERT_SCORE = 5.5
+
+# Staleness: if a track stays in the same distance bucket for this many
+# consecutive frames, a penalty is applied so it fades from alerts.
+STALENESS_FRAMES = 15            # frames of unchanged bucket → apply penalty
+STALENESS_PENALTY = 3.0          # subtracted from score after staleness
 
 # ──────────────────────────── speech ─────────────────────────────
-COOLDOWN_SEC = 3.0               # per-object cooldown before re-announcing
-TTS_RATE = 175                   # words per minute
+# Per-distance cooldowns (seconds) — near re-alerts quickly, far rarely.
+COOLDOWN_BY_DISTANCE = {"near": 3.0, "mid": 6.0, "far": 12.0}
+COOLDOWN_SEC = 3.0               # legacy fallback (used if bucket missing)
+
+# Global minimum gap between *any* two spoken alerts (prevents bursts).
+GLOBAL_SPEAK_GAP = 2.0
+
+# When a track's label+direction+distance are unchanged since the last
+# announcement, multiply the cooldown by this factor (up to a cap).
+SAME_INFO_MULTIPLIER = 2.0
+
+TTS_RATE = 175                   # words per minute (pyttsx3)
+TTS_VOLUME = 1.0                 # 0.0–1.0, sent to the default audio device
+TTS_QUEUE_SIZE = 4               # max pending phrases (was 12)
 
 # ──────────────────────────── beep ───────────────────────────────
 BEEP_SAMPLE_RATE = 22_050
-BEEP_FREQS      = {"near": 1000, "mid": 600,  "far": 350}   # Hz
-BEEP_DURATIONS   = {"near": 0.08, "mid": 0.12, "far": 0.18}  # seconds
-BEEP_INTERVALS   = {"near": 0.25, "mid": 0.60, "far": 1.20}  # pause between beeps
+BEEP_FREQS      = {"near": 1000, "mid": 600}                 # Hz (no far)
+BEEP_DURATIONS   = {"near": 0.08, "mid": 0.12}               # seconds
+BEEP_INTERVALS   = {"near": 0.25, "mid": 0.60}               # pause between beeps

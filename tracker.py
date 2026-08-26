@@ -43,6 +43,10 @@ class Track:
         self.lost: int = 0
         self.area_history: deque = deque(maxlen=AREA_HISTORY_LEN)
         self._record_area()
+        # Staleness tracking: how many consecutive frames in the same bucket
+        self.frames_seen: int = 1
+        self.bucket_streak: int = 1
+        self.last_bucket: str = det.get("distance", "far")
 
     # ── internals ───────────────────────────────────────────────
     def _record_area(self):
@@ -52,8 +56,15 @@ class Track:
     # ── public ──────────────────────────────────────────────────
     def update(self, det: dict):
         """Re-associate this track with a new detection."""
+        new_bucket = det.get("distance", "far")
+        if new_bucket == self.last_bucket:
+            self.bucket_streak += 1
+        else:
+            self.bucket_streak = 1
+            self.last_bucket = new_bucket
         self.det = det
         self.lost = 0
+        self.frames_seen += 1
         self._record_area()
 
     @property
@@ -76,6 +87,11 @@ class Tracker:
 
     def __init__(self):
         self.tracks: List[Track] = []
+
+    def reset(self):
+        """Drop all tracks and reset the global ID counter (new video)."""
+        self.tracks = []
+        Track._next_id = 1
 
     def update(self, fused_detections: list[dict]) -> List[Track]:
         """Match *fused_detections* to existing tracks; return all live tracks."""

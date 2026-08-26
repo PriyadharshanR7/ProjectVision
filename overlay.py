@@ -30,6 +30,7 @@ def draw(
     tracks: List[Track],
     fps: float,
     fault: bool = False,
+    flags: List[str] | None = None,
 ):
     """Annotate *frame* in-place and return it."""
 
@@ -69,5 +70,22 @@ def draw(
         cv2.putText(
             frame, text, (tx, h // 2 + 10), _FONT, 1.0, (255, 255, 255), 2, cv2.LINE_AA
         )
+
+    # Priority flags (bottom-left)
+    if flags:
+        h, w = frame.shape[:2]
+        shown = flags[:3]
+        y0 = h - 10 - 22 * len(shown)
+        for i, flag in enumerate(shown):
+            cv2.putText(
+                frame,
+                flag,
+                (10, y0 + i * 22),
+                _FONT,
+                0.55,
+                (0, 180, 255),
+                2,
+                cv2.LINE_AA,
+            )
 
     return frame

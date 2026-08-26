@@ -1,11 +1,11 @@
 """
 Optional proximity beep using *sounddevice* to emit sine-wave tones.
 
-The frequency and repeat rate increase as the single nearest object
-gets closer:
+The frequency and repeat rate increase as the single nearest alert-worthy
+object gets closer:
     near → 1 000 Hz, fast repeat
     mid  → 600 Hz, medium repeat
-    far  → 350 Hz, slow repeat
+    far  → silent (no beep)
 """
 
 from __future__ import annotations
@@ -23,30 +23,31 @@ class Beeper:
     """Background thread that plays proximity beeps via sounddevice."""
 
     def __init__(self, enabled: bool = True):
-        self.enabled = enabled
         self._sd = None
-        if enabled:
-            try:
-                import sounddevice as sd  # noqa: F811
+        try:
+            import sounddevice as sd  # noqa: F811
 
-                self._sd = sd
-            except ImportError:
-                print("[beep] sounddevice not available – beep disabled")
-                self.enabled = False
+            self._sd = sd
+        except ImportError:
+            print("[beep] sounddevice not available – beep disabled")
+        self.enabled = enabled and self._sd is not None
         self._thread: threading.Thread | None = None
         self._running = False
-        self._bucket = "far"
+        self._bucket: str | None = None
         self._lock = threading.Lock()
 
     # ── public ──────────────────────────────────────────────────
-    def update(self, bucket: str):
-        """Set the current distance bucket for the nearest object."""
+    def update(self, bucket: str | None):
+        """Set the current distance bucket for the nearest object.
+
+        Pass *None* to silence the beeper (no active obstacles).
+        """
         with self._lock:
             self._bucket = bucket
 
     def start(self):
         """Begin the beeping loop in a daemon thread."""
-        if not self.enabled:
+        if self._sd is None or self._running:
             return
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -64,9 +65,18 @@ class Beeper:
             with self._lock:
                 bucket = self._bucket
 
-            freq = BEEP_FREQS.get(bucket, 350)
-            dur = BEEP_DURATIONS.get(bucket, 0.18)
-            interval = BEEP_INTERVALS.get(bucket, 1.2)
+            if bucket is None or not self.enabled:
+                time.sleep(0.12)
+                continue
+
+            # Only beep for near/mid — far objects produce no sound
+            if bucket not in BEEP_FREQS:
+                time.sleep(0.12)
+                continue
+
+            freq = BEEP_FREQS[bucket]
+            dur = BEEP_DURATIONS.get(bucket, 0.12)
+            interval = BEEP_INTERVALS.get(bucket, 0.60)
 
             n_samples = int(BEEP_SAMPLE_RATE * dur)
             t = np.linspace(0, dur, n_samples, dtype=np.float32)
